@@ -1,4 +1,4 @@
-#    Asynchronous port scanner written in Nim.
+#    Cross-platform asynchronous port scanner written in Nim.
 #    Copyright (C) 2023  Maurice Lambert
 
 #    This program is free software: you can redistribute it and/or modify
@@ -27,18 +27,22 @@ proc test_port(ip: string, port: int) {.async.} =
   var state = false
   let socket = newAsyncSocket(AF_INET, SOCK_STREAM)
   try:
-    state = await withTimeout(socket.connect(ip, Port(port)), 1)
+    state = await withTimeout(socket.connect(ip, Port(port)), 1000)
   except OSError:
     discard
   finally:
     socket.close()
   if state:
     echo "[+] Port: ", ip, ":", port, " open"
+  else:
+    echo "[-] Port: ", ip, ":", port, " closed"
 
 proc scan(ips: seq[string], first: int, last: int): Future[void] {.async.} =
-  for ip in ips:
-    for port in first..last:
-      await test_port(ip, port)
+  for port in first..last:
+    for ip in ips:
+      echo ip, ":", port
+      asyncCheck test_port(ip, port)
+      echo ip, ":", port
 
 proc argument_to_int(key: string, value: string): (int, bool) =
   var int_value = 0
@@ -61,9 +65,9 @@ for kind, key, value in parser.getopt():
     of cmdEnd: break
     of cmdShortOption, cmdLongOption:
       case key:
-        of "-f", "--first-port", "--first":
+        of "f", "first-port", "first":
           (first_port, error) = argument_to_int("[-f/--first/--first-port]", value)
-        of "-l", "--last-port", "--last":
+        of "l", "last-port", "last":
           (last_port, error) = argument_to_int("[-l/--last/--last-port]", value)
         else:
           stderr.writeLine("Error: invalid option: ", key, " (", value, ")")
@@ -75,11 +79,12 @@ for kind, key, value in parser.getopt():
     break
 
 if error:
+  stderr.writeLine("Description: Cross-platform asynchronous port scanner written in Nim.")
   stderr.writeLine("Usages: scan [-f/--first/--first-port integer] [-l/--last/--last-port integer] ip1 ip2 ... ipN")
   stderr.writeLine("\tExample 1: scan 127.0.0.1")
-  stderr.writeLine("\tExample 2: scan --first 135 --last 1024 127.0.0.1")
-  stderr.writeLine("\tExample 3: scan -f 135 -l 1024 10.10.10.1 127.0.0.1")
-  stderr.writeLine("\tExample 4: scan --first-port 135 --last-port 1024 127.0.0.1")
+  stderr.writeLine("\tExample 2: scan --first=135 --last=1024 127.0.0.1")
+  stderr.writeLine("\tExample 3: scan -f=135 -l=1024 10.10.10.1 127.0.0.1")
+  stderr.writeLine("\tExample 4: scan --first-port=135 --last-port=1024 127.0.0.1")
   system.quit(1)
 
 waitFor scan(ips, first_port, last_port)
