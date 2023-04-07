@@ -23,7 +23,7 @@ under certain conditions.
 
 import asyncnet, asyncdispatch, net, strutils, parseopt, system
 
-proc test_port(ip: string, port: int) {.async.} =
+proc test_port(ip: string, port: int): Future[void] {.async.} =
   var state = false
   let socket = newAsyncSocket(AF_INET, SOCK_STREAM)
   try:
@@ -34,15 +34,13 @@ proc test_port(ip: string, port: int) {.async.} =
     socket.close()
   if state:
     echo "[+] Port: ", ip, ":", port, " open"
-  else:
-    echo "[-] Port: ", ip, ":", port, " closed"
 
 proc scan(ips: seq[string], first: int, last: int): Future[void] {.async.} =
+  var futures = newSeq[Future[void]]()
   for port in first..last:
     for ip in ips:
-      echo ip, ":", port
-      asyncCheck test_port(ip, port)
-      echo ip, ":", port
+      futures.add(test_port(ip, port))
+  await all(futures)
 
 proc argument_to_int(key: string, value: string): (int, bool) =
   var int_value = 0
