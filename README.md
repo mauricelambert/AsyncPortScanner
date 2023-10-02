@@ -15,7 +15,7 @@ Cross-platform asynchronous port scanner written in Nim.
 ## Compilation
 
 ```bash
-nim c -d:release -r --stackTrace:off --lineTrace:off --lineDir:off AsyncPortScanner.nim
+nim c --stackTrace:off --lineTrace:off --checks:off --assertions:off -d:release AsyncPortScanner.nim
 ```
 
 ## Usages
