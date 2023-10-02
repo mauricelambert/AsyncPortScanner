@@ -14,6 +14,8 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+# nim c --stackTrace:off  --lineTrace:off --checks:off --assertions:off -d:release AsyncPortScanner.nim
+
 echo """
 AsyncPortScanner  Copyright (C) 2023  Maurice Lambert
 This program comes with ABSOLUTELY NO WARRANTY.
@@ -71,13 +73,12 @@ proc start_scan(ips: seq[string], first: int, last: int, timeout: int) =
       waitFor scan(futures)
       break
     except OSError as e:
-      if e.errorCode != 10038:
-        echo "There is an error, restart smallest scans..."
+      if e.errorCode != 10038 and e.errorCode != 0:
+        echo "There is an error, restart smallest scans... ", $e.errorCode
         start_scan(ips, first, first + int((last - first) / 2), timeout)
         start_scan(ips, first + int((last - first) / 2), last, timeout)
         raise e
       sleep(timeout)
-
 
 ## This function converts an integer arguments (string) to integer
 proc argument_to_int(key: string, value: string): (int, bool) =
