@@ -70,11 +70,11 @@ By default the scan is a TCP scan on all of this ports range:
 ./scan -w=3000 192.168.0.1-192.168.56.255 192.168.0.1-192.168.56.255:udp:67-68
 ```
 
-Note: the default protocole is `icmp`, it's equivalent of `192.168.0.1-192.168.56.255:icmp`.
+> Note: the default protocole is `icmp`, it's equivalent of `192.168.0.1-192.168.56.255:icmp`.
 
 This scan performs a `ICMP` scan on the first IP range and `UDP` scan on the second IP range (on port 67 and 68).
 
-Note: It's better for optimization to use a range of port instead of a list of port ranges (`67-68` instead of `67,68`).
+> Note: It's better for optimization to use a range of port instead of a list of port ranges (`67-68` instead of `67,68`).
 
 #### Multiples IP range
 
