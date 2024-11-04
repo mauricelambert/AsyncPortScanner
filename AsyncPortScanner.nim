@@ -170,7 +170,7 @@ when defined(windows):
             if ip_to_int($ipAddr) != 0 and ip_to_int($ipMask) != 0:
                 let network_repr = $ipAddr & "/" & $ipMask
                 networks.add(ip_ranges_to_network(network_repr)[0])
-                output = output & " " & network_repr & ":tcp:21-25,135-139,80,443-445,3000,5000-5357,8000-8888,30102"
+                output = output & " " & network_repr & ":tcp:21-25,135-139,80,443-445,3000,3389,5000-5357,8000-8888,30102"
           adapter = adapter.Next
       return output
 
@@ -252,7 +252,7 @@ when defined(linux):
           if ipAddr.len > 0 and netmaskAddr.len > 0:
             let network_repr = $ipAddr & "/" & $netmaskAddr
             networks.add(ip_ranges_to_network(network_repr)[0])
-            output = output & " " & network_repr & ":tcp:21-25,135-139,80,443-445,3000,5000-5357,8000-8888,30102"
+            output = output & " " & network_repr & ":tcp:21-25,135-139,80,443-445,3000,3389,5000-5357,8000-8888,30102"
 
         current = current.ifa_next
 
@@ -580,7 +580,7 @@ proc parse_args(commandline: string): tuple[generators: seq[RefNetworkGenerator]
 proc usages(): uint64 =
     stderr.writeLine("Usages: scan [-t/--timeout] [-w/--workers=integer] [-f/--filtered/--print-filtered] [-c/--close/--print-close] [-a/--all/--print-all] scan-range1 scan-range2 ... scan-rangeN")
     stderr.writeLine("\tscan 127.0.0.1:tcp:20-445")
-    stderr.writeLine("\tscan -t=3 -w=3000 -a 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/8:icmp 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/8:tcp:20-445 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/8:udp:53,68,5353,5355")
+    stderr.writeLine("\tscan -t=3 -w=3000 -a 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/8:icmp 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/255.0.0.0:tcp:20-445 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/8:udp:53,68,5353,5355")
     return 1
 
 proc main(): uint64 =
