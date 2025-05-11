@@ -1,5 +1,5 @@
 #    Cross-platform asynchronous port scanner written in Nim.
-#    Copyright (C) 2023, 2024  Maurice Lambert
+#    Copyright (C) 2023, 2024, 2025  Maurice Lambert
 
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
@@ -388,7 +388,7 @@ proc test_connection(self: RefNetworkGenerator): Future[void] {.async.} =
 
 proc first_loop(generator: RefNetworkGenerator): Future[void] {.async.} =
     var futures = newSeq[Future[void]]()
-    while generator.start_ip != generator.end_ip:
+    while generator.current_ip != generator.end_ip:
         futures.add(generator.test_connection())
     await all(futures)
 
