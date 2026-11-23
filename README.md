@@ -77,6 +77,79 @@ By default the scan is a TCP scan on all of this ports range:
  - 8000-8888
  - 27017
 
+| Port | Service |
+| --- | --- |
+| 21 | FTP |
+| 22 | SSH |
+| 23 | Telnet |
+| 25 | SMTP |
+| 53 | DNS |
+| 80 | HTTP |
+| 110 | POP3 |
+| 111 | RPCbind |
+| 113 | Ident |
+| 119 | NNTP |
+| 123 | NTP |
+| 135 | MS-RPC |
+| 137 | NetBIOS-NS |
+| 138 | NetBIOS-DGM |
+| 139 | NetBIOS-SSN |
+| 143 | IMAP |
+| 389 | LDAP |
+| 443 | HTTPS |
+| 445 | SMB |
+| 464 | Kerberos password change |
+| 465 | SMTPS |
+| 587 | SMTP |
+| 631 | IPP |
+| 636 | LDAPS |
+| 993 | IMAPS |
+| 995 | POP3S |
+| 1433 | MSSQL |
+| 1434 | MSSQL Browser |
+| 1521 | Oracle Database |
+| 3000 | HTTP Alternative |
+| 3306 | MySQL |
+| 3389 | RDP |
+| 5000 | Development HTTP |
+| 5001 | Development HTTPS |
+| 5004 | RTP |
+| 5005 | RTCP |
+| 5060 | SIP |
+| 5061 | SIP over TLS |
+| 5222 | XMPP client |
+| 5269 | XMPP server |
+| 5351 | PCP |
+| 5353 | mDNS |
+| 5355 | LLMNR |
+| 5357 | WSDAPI |
+| 5432 | PostgreSQL |
+| 6001 | X11 |
+| 6379 | Redis |
+| 7474 | Neo4j HTTP |
+| 7547 | TR-069 |
+| 7687 | Neo4j Bolt |
+| 8000 | HTTP alternative |
+| 8006 | Proxmox VE |
+| 8008 | HTTP alternative |
+| 8009 | Apache JServ Protocol |
+| 8080 | HTTP proxy |
+| 8081 | HTTP alternative |
+| 8086 | InfluxDB |
+| 8089 | Splunk |
+| 8123 | Home Assistant |
+| 8181 | HTTP alternative |
+| 8200 | HashiCorp Vault |
+| 8333 | Bitcoin |
+| 8443 | HTTPS alternative |
+| 8500 | Consul |
+| 8530 | WSUS |
+| 8531 | WSUS over HTTPS |
+| 8834 | Nessus |
+| 8883 | MQTT over TLS |
+| 8888 | HTTP / Jupyter |
+| 27017 | MongoDB |
+
 ### Custom scan policy
 
 ```bash
