@@ -321,6 +321,12 @@ template implementSetInheritable() {.dirty.} =
 when defined(windows) or defined(nimdoc):
   import std/[winlean, sets, hashes, sysatomics]
   type
+    WrapperSocket* = object
+      fd*: AsyncFD
+      additionalData*: pointer
+
+    RefWrapperSocket* = ref WrapperSocket
+
     CompletionKey = ULONG_PTR
 
     CompletionData* = object
@@ -1781,23 +1787,24 @@ when defined(windows) or defined(nimdoc):
       saddr.sin_family = uint16(toInt(domain))
       doBind(saddr)
 
-  proc doConnect(socket: AsyncFD, addrInfo: ptr AddrInfo): owned(Future[void]) =
+  proc doConnect(socket: RefWrapperSocket, addrInfo: ptr AddrInfo): owned(Future[void]) =
     let retFuture = newFuture[void]("doConnect")
     result = retFuture
 
     var ol = newCustom()
-    ol.data = CompletionData(fd: socket, cb:
+    ol.data = CompletionData(fd: socket.fd, cb:
       proc (fd: AsyncFD, bytesCount: DWORD, errcode: OSErrorCode) =
         if not retFuture.finished:
           if errcode == OSErrorCode(-1):
             const SO_UPDATE_CONNECT_CONTEXT = 0x7010
-            socket.SocketHandle.setSockOptInt(SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, 1) # 15022
+            socket.fd.SocketHandle.setSockOptInt(SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, 1) # 15022
             retFuture.complete()
           else:
             retFuture.fail(newOSError(errcode))
     )
 
-    let ret = connectEx(socket.SocketHandle, addrInfo.ai_addr,
+    socket.additionalData = cast[POVERLAPPED](ol)
+    let ret = connectEx(socket.fd.SocketHandle, addrInfo.ai_addr,
                         cint(addrInfo.ai_addrlen), nil, 0, nil,
                         cast[POVERLAPPED](ol))
     if ret:
@@ -1814,7 +1821,7 @@ when defined(windows) or defined(nimdoc):
         GC_unref(ol)
         retFuture.fail(newOSError(lastError))
 else:
-  proc doConnect(socket: AsyncFD, addrInfo: ptr AddrInfo): owned(Future[void]) =
+  proc doConnect(socket: RefWrapperSocket, addrInfo: ptr AddrInfo): owned(Future[void]) =
     let retFuture = newFuture[void]("doConnect")
     result = retFuture
 
@@ -1832,7 +1839,7 @@ else:
         retFuture.fail(newOSError(OSErrorCode(ret)))
         return true
 
-    let ret = connect(socket.SocketHandle,
+    let ret = connect(socket.fd.SocketHandle,
                       addrInfo.ai_addr,
                       addrInfo.ai_addrlen.SockLen)
     if ret == 0:
@@ -1841,15 +1848,14 @@ else:
     else:
       let lastError = osLastError()
       if lastError.int32 == EINTR or lastError.int32 == EINPROGRESS:
-        addWrite(socket, cb)
+        addWrite(socket.fd, cb)
       else:
         retFuture.fail(newOSError(lastError))
 
 template asyncAddrInfoLoop(addrInfo: ptr AddrInfo, fd: untyped,
-                           protocol: Protocol = IPPROTO_RAW) =
+                           protocol: Protocol = IPPROTO_RAW, shouldCreateFd: static bool = false) =
   ## Iterates through the AddrInfo linked list asynchronously
   ## until the connection can be established.
-  const shouldCreateFd = not declared(fd)
 
   when shouldCreateFd:
     let sockType = protocol.toSockType()
@@ -1866,9 +1872,9 @@ template asyncAddrInfoLoop(addrInfo: ptr AddrInfo, fd: untyped,
   var curAddrInfo = addrInfo
   var domain: Domain
   when shouldCreateFd:
-    var curFd: AsyncFD
+    var curFd: RefWrapperSocket
   else:
-    var curFd = fd
+    var curFd: RefWrapperSocket = fd
   proc tryNextAddrInfo(fut: Future[void]) {.gcsafe.} =
     if fut == nil or fut.failed:
       if fut != nil:
@@ -1893,17 +1899,17 @@ template asyncAddrInfoLoop(addrInfo: ptr AddrInfo, fd: untyped,
         return
 
       when shouldCreateFd:
-        curFd = fdPerDomain[ord(domain)]
-        if curFd == osInvalidSocket.AsyncFD:
+        curFd.fd = fdPerDomain[ord(domain)]
+        if curFd.fd == osInvalidSocket.AsyncFD:
           try:
-            curFd = createAsyncNativeSocket(domain, sockType, protocol)
+            curFd.fd = createAsyncNativeSocket(domain, sockType, protocol)
           except:
             freeAddrInfo(addrInfo)
             closeUnusedFds()
             raise getCurrentException()
           when defined(windows):
-            curFd.SocketHandle.bindToDomain(domain)
-          fdPerDomain[ord(domain)] = curFd
+            curFd.fd.SocketHandle.bindToDomain(domain)
+          fdPerDomain[ord(domain)] = curFd.fd
 
       doConnect(curFd, curAddrInfo).callback = tryNextAddrInfo
       curAddrInfo = curAddrInfo.ai_next
@@ -1911,7 +1917,7 @@ template asyncAddrInfoLoop(addrInfo: ptr AddrInfo, fd: untyped,
       freeAddrInfo(addrInfo)
       when shouldCreateFd:
         closeUnusedFds(ord(domain))
-        retFuture.complete(curFd)
+        retFuture.complete(curFd.fd)
       else:
         retFuture.complete()
 
@@ -1930,21 +1936,21 @@ proc dial*(address: string, port: Port,
   let sockType = protocol.toSockType()
 
   let aiList = getAddrInfo(address, port, Domain.AF_UNSPEC, sockType, protocol)
-  asyncAddrInfoLoop(aiList, noFD, protocol)
+  # asyncAddrInfoLoop(aiList, RefWrapperSocket(), protocol, true)
 
-proc connect*(socket: AsyncFD, address: string, port: Port,
+proc connect*(socket: RefWrapperSocket, address: string, port: Port,
               domain = Domain.AF_INET): owned(Future[void]) =
   let retFuture = newFuture[void]("connect")
   result = retFuture
 
   when defined(windows):
-    verifyPresence(socket)
+    verifyPresence(socket.fd)
   else:
-    assert getSockDomain(socket.SocketHandle) == domain
+    assert getSockDomain(socket.fd.SocketHandle) == domain
 
   let aiList = getAddrInfo(address, port, domain)
   when defined(windows):
-    socket.SocketHandle.bindToDomain(domain)
+    socket.fd.SocketHandle.bindToDomain(domain)
   asyncAddrInfoLoop(aiList, socket)
 
 proc sleepAsync*(ms: int | float): owned(Future[void]) =

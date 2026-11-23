@@ -99,7 +99,8 @@ import std/private/since
 when defined(nimPreviewSlimSystem):
   import std/[assertions, syncio]
 
-import std/[asyncdispatch, nativesockets, net, os]
+import asyncdispatch
+import std/[nativesockets, net, os]
 
 export SOBool
 
@@ -116,8 +117,8 @@ type
   # TODO: I would prefer to just do:
   # AsyncSocket* {.borrow: `.`.} = distinct Socket. But that doesn't work.
   AsyncSocketDesc = object
-    fd: SocketHandle
-    closed: bool     ## determines whether this socket has been closed
+    fd*: SocketHandle
+    closed*: bool     ## determines whether this socket has been closed
     isBuffered: bool ## determines whether this socket is buffered.
     buffer: array[0..BufferSize, char]
     currPos: int     # current index in buffer
@@ -135,6 +136,12 @@ type
     sockType: SockType
     protocol: Protocol
   AsyncSocket* = ref AsyncSocketDesc
+
+  WrapperAsyncSocket* = object
+    asyncSocket*: AsyncSocket
+    wrapperSocket*: RefWrapperSocket
+
+  RefWrapperAsyncSocket* = ref WrapperAsyncSocket
 
 proc newAsyncSocket*(fd: AsyncFD, domain: Domain = AF_INET,
                      sockType: SockType = SOCK_STREAM,
@@ -352,25 +359,25 @@ proc dial*(address: string, port: Port, protocol = IPPROTO_TCP,
   let domain = getSockDomain(asyncFd.SocketHandle)
   result = newAsyncSocket(asyncFd, domain, sockType, protocol, buffered)
 
-proc connect*(socket: AsyncSocket, address: string, port: Port) {.async.} =
+proc connect*(socket: RefWrapperAsyncSocket, address: string, port: Port) {.async.} =
   ## Connects `socket` to server at `address:port`.
   ##
   ## Returns a `Future` which will complete when the connection succeeds
   ## or an error occurs.
-  await connect(socket.fd.AsyncFD, address, port, socket.domain)
-  if socket.isSsl:
+  await connect(socket.wrapperSocket, address, port, socket.asyncSocket.domain)
+  if socket.asyncSocket.isSsl:
     when defineSsl:
-      if socket.sslHandle == nil:
+      if socket.asyncSocket.sslHandle == nil:
         raiseSslHandleError()
       if not isIpAddress(address):
         # Set the SNI address for this connection. This call can fail if
         # we're not using TLSv1+.
         # RFC 6066 does not allow IP addresses as SNI host names.
-        discard SSL_set_tlsext_host_name(socket.sslHandle, address)
-      socket.sslVerifyHost = address
+        discard SSL_set_tlsext_host_name(socket.asyncSocket.sslHandle, address)
+      socket.asyncSocket.sslVerifyHost = address
 
-      sslSetConnectState(socket.sslHandle)
-      await finishHandshake(socket, {SocketFlag.SafeDisconn})
+      sslSetConnectState(socket.asyncSocket.sslHandle)
+      await finishHandshake(socket.asyncSocket, {SocketFlag.SafeDisconn})
 
 template readInto(buf: pointer, size: int, socket: AsyncSocket,
                   flags: set[SocketFlag]): int =

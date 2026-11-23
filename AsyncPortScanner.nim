@@ -20,38 +20,101 @@
 # nim.exe c --passl:"-static -static-libgcc -static-libstdc++" --opt:size --stackTrace:off  --lineTrace:off --checks:off --assertions:off -d:release -d:windows AsyncPortScanner.nim
 
 # To compile on windows with nim 1.6.14:
-# nim c --stackTrace:off  --lineTrace:off --checks:off --assertions:off -d:release -d:linux AsyncPortScanner.nim
+# nim c --os:linux --cpu:amd64 --stackTrace:off  --lineTrace:off --checks:off --assertions:off -d:release -d:linux AsyncPortScanner.nim
 
-import asyncnet, asyncdispatch, net, strutils, parseopt, system, sequtils, math, tables
+import asyncnet, asyncdispatch, net, strutils, parseopt, system, sequtils, math, tables, times
 when defined(windows):
     import winim/lean
 when defined(linux):
     import posix
 
 type
-    NetworkGenerator = object
-        current_ip: uint32
-        current_port: uint16
+    IpEntryKind = enum
+        SingleIp,
+        IpRange
+
+    PortEntryKind = enum
+        SinglePort,
+        PortRange
+
+    IpEntry = object
+        case kind: IpEntryKind
+        of SingleIp:
+          ip: uint32
+        of IpRange:
+          start_ip: uint32
+          end_ip: uint32
+
+    PortEntry = object
+        case kind: PortEntryKind
+        of SinglePort:
+          port: uint16
+        of PortRange:
+          start_port: uint16
+          end_port: uint16
+
+    IpGenerator = object
+        ips: seq[IpEntry]
+        current_ip_index: uint32
+        sub_current_ip_index: uint32
+        size: uint64
+
+    RefIpGenerator = ref IpGenerator
+
+    PortGenerator = object
+        ports: seq[PortEntry]
+        current_port_index: uint32
+        sub_current_port_index: uint16
+        size: uint64
+
+    RefPortGenerator = ref PortGenerator
+
+    ScanGenerator = object
+        ip_generator: RefIpGenerator
+        port_generator: RefPortGenerator
         protocol: uint8
-        start_ip: uint32
-        end_ip: uint32
-        start_port: uint16
-        end_port: uint16
-        empty: bool
+        size: uint64
+        current_index: uint64
+
+    RefScanGenerator = ref ScanGenerator
+
+    GlobalScanGenerator = object
+        scans: seq[RefScanGenerator]
+        size: uint64
+        current_scan_index: uint32
+        current_index: uint64
+
+    RefGlobalScanGenerator = ref GlobalScanGenerator
+
+    UniqueRandom = object
+        minimum: uint64
+        n: uint64
+        a: uint64
+        b: uint64
+        index: uint64
+
+    RefUniqueRandom = ref UniqueRandom
 
     IpState = enum
-        not_checked = 0, in_arptable = 1, not_in_arptable = 2, not_local_ip = 3
+        not_checked = 0, in_arptable = 1, not_in_arptable = 2, not_local_ip = 3, self_ip = 4
 
-type RefNetworkGenerator = ref NetworkGenerator
-type IpStartEnd = tuple[start_ip: string, end_ip: string]
-type NetworkStartEnd = tuple[start_ip: uint32, end_ip: uint32]
-type PortStartEnd = tuple[start_port: uint16, end_port: uint16]
+    IpStartEnd = tuple[start_ip: uint64, end_ip: uint64]
+    NetworkStartEnd = tuple[start_ip: uint32, end_ip: uint32]
+    PortStartEnd = tuple[start_port: uint16, end_port: uint16]
+    StopIteration = object of CatchableError
 
 var
+    tests = 0
+    opens = 0
+    errors = 0
+    cancels = 0
+    random = true
+    optimized = true
     print_all = false
     timeout = 1 * 1000
     print_close = false
     print_filtered = false
+    self_ips = newSeq[uint32]()
     networks = newSeq[NetworkStartEnd]()
     ip_used = initTable[uint64, IpState]()
 
@@ -95,24 +158,37 @@ when defined(windows):
         ERROR_INSUFFICIENT_BUFFER = 122
 
     type
-      MIB_IPNETROW* {.packed.} = object
-        dwIndex*: uint32
-        dwPhysAddrLen*: uint32
-        bPhysAddr*: array[8, uint8]
-        dwAddr*: uint32
-        dwType*: uint32
+      HANDLE = int
+      DWORD = int32
+      PULONG = ptr int
 
-      MIB_IPNETTABLE* {.packed.} = object
-        dwNumEntries*: uint32
-        table*: UncheckedArray[MIB_IPNETROW]
+      OVERLAPPED {.pure, inheritable.} = object
+        internal: PULONG
+        internalHigh: PULONG
+        offset: DWORD
+        offsetHigh: DWORD
+        hEvent: HANDLE
 
-      IP_ADDR_STRING* = object
+      POVERLAPPED = ptr OVERLAPPED
+
+      MIB_IPNETROW {.packed.} = object
+        dwIndex: uint32
+        dwPhysAddrLen: uint32
+        bPhysAddr: array[8, uint8]
+        dwAddr: uint32
+        dwType: uint32
+
+      MIB_IPNETTABLE {.packed.} = object
+        dwNumEntries: uint32
+        table: UncheckedArray[MIB_IPNETROW]
+
+      IP_ADDR_STRING = object
         Next: ptr IP_ADDR_STRING
         IpAddress: array[16, char]
         IpMask: array[16, char]
         Context: uint32
 
-      IP_ADAPTER_INFO* = object
+      IP_ADAPTER_INFO = object
         Next: ptr IP_ADAPTER_INFO
         ComboIndex: uint32
         AdapterName: array[260, char]
@@ -132,8 +208,15 @@ when defined(windows):
         LeaseObtained: int64
         LeaseExpires: int64
 
+    proc CancelIoEx(hFile: HANDLE, lpOverlapped: POVERLAPPED): WINBOOL {.stdcall, dynlib: "kernel32", importc: "CancelIoEx".}
     proc GetAdaptersInfo(lpAdapterInfo: ptr IP_ADAPTER_INFO; pOutBufLen: ptr uint32): int32 {.stdcall, dynlib: "iphlpapi.dll", importc.}
-    proc GetIpNetTable*(pIpNetTable: ptr MIB_IPNETTABLE, pdwSize: ptr uint32, bOrder: uint32): int32 {.cdecl, dynlib: "iphlpapi.dll", importc.}
+    proc GetIpNetTable(pIpNetTable: ptr MIB_IPNETTABLE, pdwSize: ptr uint32, bOrder: uint32): int32 {.cdecl, dynlib: "iphlpapi.dll", importc.}
+
+    proc swap_ip(ip: uint32): uint32 =
+        ((ip and 0x000000FF'u32) shl 24) or
+        ((ip and 0x0000FF00'u32) shl 8) or
+        ((ip and 0x00FF0000'u32) shr 8) or
+        ((ip and 0xFF000000'u32) shr 24)
 
     proc check_ip_in_arp_cache(ip: uint32): bool =
       var table_size: uint32 = 0
@@ -146,12 +229,12 @@ when defined(windows):
         net_table_return = GetIpNetTable(table_pointer, addr table_size, 0)
         if net_table_return == NO_ERROR:
           for i in 0..<int(table_pointer.dwNumEntries):
-            if table_pointer.table[i].dwAddr == uint32(ip):
+            if swap_ip(table_pointer.table[i].dwAddr) == ip and (table_pointer.table[i].dwType == 3 or table_pointer.table[i].dwType == 4):
               return true
       return false
 
     proc getIPv4andNetmask(): string =
-      var output = "-w=3000"
+      var output = "-w=100"
       var size: uint32
       var error_code = GetAdaptersInfo(nil, addr size)
       if error_code != 111:
@@ -169,8 +252,9 @@ when defined(windows):
           if ipAddr[0] != '\0':
             if ip_to_int($ipAddr) != 0 and ip_to_int($ipMask) != 0:
                 let network_repr = $ipAddr & "/" & $ipMask
+                self_ips.add(ip_to_int($ipAddr))
                 networks.add(ip_ranges_to_network(network_repr)[0])
-                output = output & " " & network_repr & ":tcp:21-25,135-139,80,443-445,3000,3389,5000-5357,8000-8888,30102"
+                output = output & " " & network_repr & ":tcp:21-25,53,80,110-143,389,443-465,631-636,993-995,1433-1434,1521,3000,3306,3389,5000-5357,5432,6001,6379,7474,7547,7687,8000-8888,27017"
           adapter = adapter.Next
       return output
 
@@ -252,15 +336,202 @@ when defined(linux):
           if ipAddr.len > 0 and netmaskAddr.len > 0:
             let network_repr = $ipAddr & "/" & $netmaskAddr
             networks.add(ip_ranges_to_network(network_repr)[0])
-            output = output & " " & network_repr & ":tcp:21-25,135-139,80,443-445,3000,3389,5000-5357,8000-8888,30102"
+            output = output & " " & network_repr & ":tcp:21-25,135-139,80,443-445,3000,3389,5000-5357,8000-8888,9100,30102"
 
         current = current.ifa_next
 
       freeifaddrs(ifaddr)
       return output
 
-proc construct(start_ip: string, end_ip: string, start_port: uint16, end_port: uint16, protocol: string): RefNetworkGenerator =
+proc constructUniqueRandom(minimum: uint64, maximum: uint64, key: uint64 = 123456789): RefUniqueRandom =
+    let n = maximum - minimum
+    var a = key or 1'u64
+    while gcd(a, n) != 1:
+        a += 2
+    return RefUniqueRandom(minimum: minimum, n: n, a: a, b: (key * 6364136223846793005'u64) mod n)
+
+proc get(self: RefUniqueRandom, index: uint64): uint64 =
+    if index >= self.n:
+        raise newException(StopIteration, "All values returned")
+    self.minimum + (self.a * index + self.b) mod self.n
+
+proc infinite_get(self: RefUniqueRandom, index: uint64): uint64 =
+    self.minimum + (self.a * index + self.b) mod self.n
+
+proc has_next(self: RefUniqueRandom): bool =
+    if self.index >= self.n:
+        return false
+    return true
+
+proc next(self: RefUniqueRandom): uint64 =
+    if self.index >= self.n:
+        raise newException(StopIteration, "All values returned")
+    result = self.minimum + (self.a * self.index + self.b) mod self.n
+    self.index += 1
+
+proc add_ips(self: RefIpGenerator, start_ip: uint32, end_ip: uint32): uint64 =
+    if end_ip == 0:
+        self.ips.add(IpEntry(kind: SingleIp, ip: start_ip))
+        self.size += 1
+        return 1
+    self.ips.add(IpEntry(kind: IpRange, start_ip: start_ip, end_ip: end_ip))
+    let count = end_ip - start_ip + 1
+    self.size += count
+    return count
+
+proc find_ip(self: RefIpGenerator, index: uint32): uint32 =
+    var remaining = index
+
+    for entry in self.ips:
+        case entry.kind:
+        of SingleIp:
+            if remaining == 0:
+                return entry.ip
+            remaining -= 1
+        of IpRange:
+            let count = entry.end_ip - entry.start_ip + 1
+            if remaining < count:
+                return entry.start_ip + remaining
+            remaining -= count
+
+    raise newException(IndexDefect, "IP index out of bounds (" & $index & "/" & $self.size & ")")
+
+proc next_ip(self: RefIpGenerator): uint32 =
+    if self.current_ip_index >= uint32(self.ips.len):
+        raise newException(IndexDefect, "No more IPs")
+
+    let entry = self.ips[self.current_ip_index]
+
+    case entry.kind:
+    of SingleIp:
+        result = entry.ip
+        self.current_ip_index += 1
+        self.sub_current_ip_index = 0
+    of IpRange:
+        result = entry.start_ip + self.sub_current_ip_index
+        if result == entry.end_ip:
+            self.current_ip_index += 1
+            self.sub_current_ip_index = 0
+        else:
+            self.sub_current_ip_index += 1
+
+proc has_next(self: RefIpGenerator): bool =
+    if self.current_ip_index >= uint32(self.ips.len):
+        return false
+    return true
+
+proc add_ports(self: RefPortGenerator, start_port: uint16, end_port: uint16): uint64 =
+    if end_port == 0:
+        self.ports.add(PortEntry(kind: SinglePort, port: start_port))
+        self.size += 1
+        return 1
+    self.ports.add(PortEntry(kind: PortRange, start_port: start_port, end_port: end_port))
+    let count = end_port - start_port + 1
+    self.size += count
+    return count
+
+proc find_port(self: RefPortGenerator, index: uint32): uint16 =
+    var remaining = index
+
+    for entry in self.ports:
+        case entry.kind:
+        of SinglePort:
+            if remaining == 0:
+                return entry.port
+            remaining -= 1
+        of PortRange:
+            let count = entry.end_port - entry.start_port + 1
+            if remaining < count:
+                return entry.start_port + uint16(remaining)
+            remaining -= count
+
+    raise newException(IndexDefect, "Port index out of bounds (" & $index & "/" & $self.size & ")")
+
+proc next_port(self: RefPortGenerator): uint16 =
+    if self.current_port_index >= uint32(self.ports.len):
+        raise newException(IndexDefect, "No more ports")
+
+    let entry = self.ports[self.current_port_index]
+
+    case entry.kind:
+    of SinglePort:
+        result = entry.port
+        self.current_port_index += 1
+        self.sub_current_port_index = 0
+    of PortRange:
+        result = entry.start_port + self.sub_current_port_index
+        if result == entry.end_port:
+            self.current_port_index += 1
+            self.sub_current_port_index = 0
+        else:
+            self.sub_current_port_index += 1
+
+proc has_next(self: RefPortGenerator): bool =
+    if self.current_port_index >= uint32(self.ports.len):
+        return false
+    return true
+
+proc add_connections(self: RefScanGenerator, ip_generator: RefIpGenerator, port_generator: RefPortGenerator): uint64 =
+    self.ip_generator = ip_generator
+    self.port_generator = port_generator
+    result = ip_generator.size * port_generator.size
+    self.size += result
+
+proc find_connection(self: RefScanGenerator, index: uint64): uint64 =
+    if index >= self.size:
+        raise newException(IndexDefect, "Connection index out of bounds (" & $index & "/" & $self.size & ")")
+
+    let ip_count = self.ip_generator.size
+    let ip_index = index mod ip_count
+    let port_index = index div ip_count
+    let ip = self.ip_generator.find_ip(uint32(ip_index))
+    let port = self.port_generator.find_port(uint32(port_index))
+
+    return uint64(self.protocol) + (uint64(port) shl 8) + (uint64(ip) shl 24)
+
+proc has_next(self: RefScanGenerator): bool =
+    if self.current_index >= self.size:
+        return false
+    return true
+
+proc next_connection(self: RefScanGenerator): uint64 =
+    if self.current_index >= self.size:
+        raise newException(IndexDefect, "No more connection combinations")
+    result = self.find_connection(self.current_index)
+    self.current_index += 1
+
+proc add_scans(self: RefGlobalScanGenerator, scan: RefScanGenerator): uint64 =
+    self.scans.add(scan)
+    self.size += scan.size
+    return scan.size
+
+proc find_scan(self: RefGlobalScanGenerator, index: uint64): uint64 =
+    if index >= self.size:
+        raise newException(IndexDefect, "Scan index out of bounds (" & $index & "/" & $self.size & ")")
+
+    var remaining = index
+    for scan in self.scans:
+        if remaining < scan.size:
+            return scan.find_connection(remaining)
+        remaining -= scan.size
+
+    raise newException(IndexDefect, "Scan index out of bounds (" & $index & "/" & $self.size & ")")
+
+proc next_scan(self: RefGlobalScanGenerator): uint64 =
+    while self.current_scan_index < uint32(self.scans.len):
+        let scan_index = self.current_scan_index
+        let scan = addr self.scans[scan_index]
+
+        if scan[].current_index < scan[].size:
+            result = scan[].next_connection()
+            return
+        self.current_scan_index += 1
+
+    raise newException(IndexDefect, "No more scan combinations")
+
+proc constructScanGenerator(ip_generator: RefIpGenerator, port_generator: RefPortGenerator, protocol: string): RefScanGenerator =
     var protocol_int: uint8
+    let scan_generator: RefScanGenerator = RefScanGenerator()
 
     if protocol == "tcp":
         protocol_int = 6
@@ -268,43 +539,35 @@ proc construct(start_ip: string, end_ip: string, start_port: uint16, end_port: u
         protocol_int = 17
     elif protocol == "icmp":
         protocol_int = 1
-
-    let start_ip_int = ip_to_int(start_ip)
-
-    return RefNetworkGenerator(
-        current_ip: start_ip_int,
-        current_port: start_port,
-        protocol: protocol_int,
-        start_ip: start_ip_int,
-        end_ip: ip_to_int(end_ip),
-        start_port: start_port,
-        end_port: end_port,
-        empty: false
-    )
-
-proc next(self: RefNetworkGenerator): uint64 =
-    let returns: uint64 = self.protocol + uint64(self.current_port) shl 8 + uint64(self.current_ip) shl 24
-
-    if self.current_ip == self.end_ip:
-        self.current_ip = self.start_ip
-        if self.current_port == self.end_port:
-            self.empty = true
-        else:
-            self.current_port += 1
     else:
-        self.current_ip += 1
+        raise newException(ValueError, "Protocol may be 'icmp', 'tcp' or 'udp', not: " & protocol)
 
-    return returns
+    discard scan_generator.add_connections(ip_generator, port_generator)
+    scan_generator.protocol = protocol_int
+    return scan_generator
 
-proc test_tcp(ip: string, port: uint16): Future[void] {.async.} =
+proc test_tcp(ip: string, port: uint16, error: bool = false): Future[void] {.async.} =
+    tests += 1
     var
         state = "filtered"
         no_timeout: bool
     let socket = newAsyncSocket(Domain.AF_INET, SockType.SOCK_STREAM)
+    let w = RefWrapperAsyncSocket(asyncSocket: socket, wrapperSocket: RefWrapperSocket(fd: socket.fd.AsyncFD))
     try:
-        no_timeout = await withTimeout(socket.connect(ip, Port(port)), timeout)
+        no_timeout = await withTimeout(w.connect(ip, Port(port)), timeout)
         if no_timeout:
+            opens += 1
             state = "open"
+        else:
+            when defined(windows):
+                cancels += 1
+                if CancelIoEx(cast[HANDLE](socket.fd.AsyncFD), cast[LPOVERLAPPED](w.wrapperSocket.additionalData)) == 0:
+                    if GetLastError() == 0x490:
+                        errors += 1
+                        if error:
+                            stderr.writeLine("Warning: Too many errors detected. Consider reducing the number of workers.")
+                        socket.closed = true
+                        await test_tcp(ip, port, true)
     except OSError:
         state = "close"
     finally:
@@ -355,8 +618,7 @@ proc test_icmp(ip: string): Future[void] {.async.} =
     if state == "up" or print_all  or (print_close and state == "down"):
         echo "IP: " & ip & "/icmp, state: " & state
 
-proc test_connection(self: RefNetworkGenerator): Future[void] {.async.} =
-    let next = self.next()
+proc test_connection(next: uint64): Future[void] {.async.} =
     let
         protocol: uint8 = uint8(next and 0xff)
         port: uint16 = uint16(next shr 8 and 0xffff)
@@ -367,8 +629,11 @@ proc test_connection(self: RefNetworkGenerator): Future[void] {.async.} =
         ip_used[ip_int] = IpState.not_local_ip
         for i in 0 ..< networks.len:
             let network = networks[i]
-            if ip_int >= network.start_ip and ip_int <= network.end_ip:
+            if (network.end_ip == 0 and ip_int == network.start_ip) or (ip_int >= network.start_ip and ip_int <= network.end_ip):
                 ip_used[ip_int] = IpState.not_checked
+        for self_ip in self_ips:
+            if ip_int == self_ip:
+                ip_used[ip_int] = IpState.self_ip
 
     if ip_used[ip_int] == IpState.not_in_arptable:
         return
@@ -386,35 +651,96 @@ proc test_connection(self: RefNetworkGenerator): Future[void] {.async.} =
         else:
             ip_used[ip_int] = IpState.not_in_arptable
 
-proc first_loop(generator: RefNetworkGenerator): Future[void] {.async.} =
+proc first_random_loop(generator: RefScanGenerator): Future[void] {.async.} =
     var futures = newSeq[Future[void]]()
-    while generator.current_ip != generator.end_ip:
-        futures.add(generator.test_connection())
+    let time = uint64(epochTime())
+    let random_ip_index = constructUniqueRandom(0, generator.ip_generator.size, time)
+    let random_port_index = constructUniqueRandom(0, generator.port_generator.size, time)
+    for i in 0 ..< generator.ip_generator.size:
+        let connection = uint64(generator.protocol) + (uint64(generator.port_generator.find_port(uint32(random_port_index.infinite_get(uint64(i))))) shl 8) + (uint64(generator.ip_generator.find_ip(uint32(random_ip_index.get(uint64(i))))) shl 24)
+        futures.add(test_connection(connection))
     await all(futures)
 
-proc scan(generators: seq[RefNetworkGenerator]): Future[void] {.async.} =
+proc optimized_random_scan(generators: RefGlobalScanGenerator): Future[void] {.async.} =
     var futures = newSeq[Future[void]]()
-    for i in 0 ..< generators.len:
-        let generator: RefNetworkGenerator = generators[i]
+    for i in 0 ..< generators.scans.len:
+        let generator: RefScanGenerator = generators.scans[i]
+        await first_random_loop(generator)
+        let random_index = constructUniqueRandom(0, generator.size, uint64(epochTime()))
+        for i in 0 ..< generator.size:
+            futures.add(test_connection(generator.find_connection(random_index.get(uint64(i)))))
+    await all(futures)
+
+proc random_scan(generators: RefGlobalScanGenerator): Future[void] {.async.} =
+    var futures = newSeq[Future[void]]()
+    let random_index = constructUniqueRandom(0, generators.size, uint64(epochTime()))
+    for i in 0 ..< generators.size:
+        futures.add(test_connection(generators.find_scan(random_index.get(uint64(i)))))
+    await all(futures)
+
+proc first_loop(generator: RefScanGenerator): Future[void] {.async.} =
+    var futures = newSeq[Future[void]]()
+    for i in 0 ..< generator.ip_generator.size:
+        futures.add(test_connection(generator.next_connection()))
+    await all(futures)
+
+proc scan(generators: RefGlobalScanGenerator): Future[void] {.async.} =
+    var futures = newSeq[Future[void]]()
+    for i in 0 ..< generators.scans.len:
+        let generator: RefScanGenerator = generators.scans[i]
         await first_loop(generator)
-        while not generator.empty:
-            futures.add(generator.test_connection())
+        while generator.has_next():
+            futures.add(test_connection(generator.next_connection()))
     await all(futures)
 
-proc first_shared_loop(generator: RefNetworkGenerator, workers: uint64, id: uint64): Future[void] {.async.} =
-    for i in 0..(generator.end_ip - generator.start_ip):
+proc first_random_shared_loop(generator: RefScanGenerator, random_index: RefUniqueRandom, workers: uint64, id: uint64): Future[void] {.async.} =
+    while random_index.has_next():
+        let i = random_index.next()
         if (i mod workers) == id:
-            await generator.test_connection()
+            await test_connection(generator.find_connection(i))
 
-proc worker_scan(generators: seq[RefNetworkGenerator], workers: uint64, id: uint64): Future[void] {.async.} =
-    for i in 0 ..< generators.len:
-        var generator: RefNetworkGenerator = generators[i]
-        if not generator.empty:
-            await first_shared_loop(generator, workers, id)
-        while not generator.empty:
-            await generator.test_connection()
+proc optimized_worker_random_scan(generators: RefGlobalScanGenerator, workers: uint64, id: uint64): Future[void] {.async.} =
+    for i in 0 ..< generators.scans.len:
+        let generator: RefScanGenerator = generators.scans[i]
+        let random_index = constructUniqueRandom(0, generator.ip_generator.size, uint64(epochTime()))
+        await first_random_shared_loop(generator, random_index, workers, id)
+        let random_index2 = constructUniqueRandom(generator.ip_generator.size, generator.size, uint64(epochTime()))
+        while random_index2.has_next():
+            let i = random_index2.next()
+            if (i mod workers) == id:
+                await test_connection(generator.find_connection(i))
 
-proc workers_scan(generators: seq[RefNetworkGenerator], workers: uint64): Future[void] {.async.} =
+proc optimized_workers_random_scan(generators: RefGlobalScanGenerator, workers: uint64): Future[void] {.async.} =
+    var futures = newSeq[Future[void]]()
+    for i in 0 ..< workers:
+        futures.add(optimized_worker_random_scan(generators, workers, i))
+    await all(futures)
+
+proc worker_random_scan(generators: RefGlobalScanGenerator, random_index: RefUniqueRandom): Future[void] {.async.} =
+    while random_index.has_next():
+        await test_connection(generators.find_scan(random_index.next()))
+
+proc workers_random_scan(generators: RefGlobalScanGenerator, workers: uint64): Future[void] {.async.} =
+    var futures = newSeq[Future[void]]()
+    let random_index = constructUniqueRandom(0, generators.size, uint64(epochTime()))
+    for i in 0 ..< workers:
+        futures.add(worker_random_scan(generators, random_index))
+    await all(futures)
+
+proc first_shared_loop(generator: RefScanGenerator, workers: uint64, id: uint64): Future[void] {.async.} =
+    for i in 0 ..< generator.ip_generator.size:
+        if (i mod workers) == id:
+            await test_connection(generator.find_connection(uint64(i)))
+
+proc worker_scan(generators: RefGlobalScanGenerator, workers: uint64, id: uint64): Future[void] {.async.} =
+    for i in 0 ..< generators.scans.len:
+        let generator: RefScanGenerator = generators.scans[i]
+        generator.current_index = generator.ip_generator.size
+        await first_shared_loop(generator, workers, id)
+        while generator.has_next():
+            await test_connection(generator.next_connection())
+
+proc workers_scan(generators: RefGlobalScanGenerator, workers: uint64): Future[void] {.async.} =
     var futures = newSeq[Future[void]]()
     for i in 0 ..< workers:
         futures.add(worker_scan(generators, workers, i))
@@ -484,29 +810,23 @@ proc ip_ranges_to_network(ip_ranges: string): seq[NetworkStartEnd] =
             else:
                 network = (start_ip: ip_to_int(parts[0]), end_ip: ip_to_int(parts[0].rsplit('.', maxsplit=1)[0] & "." & parts[1]))
         else:
-            network = (start_ip: ip_to_int(ip_range), end_ip: ip_to_int(ip_range))
+            network = (start_ip: ip_to_int(ip_range), end_ip: 0)
 
         networks.add(network)
 
     return networks
 
-proc ip_ranges_to_startend(ip_ranges: string): seq[IpStartEnd] =
-    var ips_ranges: seq[IpStartEnd] = @[]
-
+proc ip_ranges_to_startend(ip_ranges: string): RefIpGenerator =
+    let ips_ranges: RefIpGenerator = RefIpGenerator()
     for network in ip_ranges_to_network(ip_ranges):
-        var ipstartend: IpStartEnd
-        ipstartend = (start_ip: int_to_ip(network.start_ip), end_ip: int_to_ip(network.end_ip))
-        ips_ranges.add(ipstartend)
-
+        discard ips_ranges.add_ips(network.start_ip, network.end_ip)
     return ips_ranges
 
-proc port_ranges_to_startend(port_ranges: string): seq[PortStartEnd] =
-    var ports_ranges: seq[PortStartEnd] = @[]
+proc port_ranges_to_startend(port_ranges: string): RefPortGenerator =
+    let ports_ranges: RefPortGenerator = RefPortGenerator()
 
     for port_range in port_ranges.split(','):
-        var portstartend: PortStartEnd
         if port_range.contains('-'):
-
             let parts = port_range.split('-')
             if not isPositiveInteger(parts[0]) or not isPositiveInteger(parts[1]):
                 raise newException(ValueError, "Invalid port range format: " & port_range)
@@ -514,41 +834,37 @@ proc port_ranges_to_startend(port_ranges: string): seq[PortStartEnd] =
             let end_port = parts[1].parseInt()
             if start_port > 0xffff or end_port > 0xffff:
                 raise newException(ValueError, "Invalid port range format: " & port_range)
-            portstartend = (start_port: uint16(start_port), end_port: uint16(end_port))
+            discard ports_ranges.add_ports(uint16(start_port), uint16(end_port))
 
         else:
             if not isPositiveInteger(port_range):
                 raise newException(ValueError, "Invalid port range format: " & port_range)
-
             let start_port = port_range.parseInt()
-
             if start_port > 0xffff:
                 raise newException(ValueError, "Invalid port range format: " & port_range)
-
-            portstartend = (start_port: uint16(start_port), end_port: uint16(start_port))
-
-        ports_ranges.add(portstartend)
+            discard ports_ranges.add_ports(uint16(start_port), 0)
 
     return ports_ranges
 
 
-proc ranges_string_to_generators(full_ranges: string, scan_range: var seq[RefNetworkGenerator]): bool =
+proc ranges_string_to_generators(full_ranges: string, scan_range: RefGlobalScanGenerator): bool =
     let parts = full_ranges.split(':')
     if len(parts) == 1:
-        for startend in ip_ranges_to_startend(parts[0]):
-            scan_range.add(construct(startend[0], startend[1], 0, 0, "icmp"))
+        let port_generator = RefPortGenerator()
+        discard port_generator.add_ports(0, 0)
+        discard scan_range.add_scans(constructScanGenerator(ip_ranges_to_startend(parts[0]), port_generator, "icmp"))
+    elif len(parts) == 2:
+        discard scan_range.add_scans(constructScanGenerator(ip_ranges_to_startend(parts[0]), port_ranges_to_startend(parts[1]), "tcp"))
     elif len(parts) == 3:
-        for ip_startend in ip_ranges_to_startend(parts[0]):
-            for port_startend in port_ranges_to_startend(parts[2]):
-                scan_range.add(construct(ip_startend[0], ip_startend[1], port_startend[0], port_startend[1], parts[1]))
+        discard scan_range.add_scans(constructScanGenerator(ip_ranges_to_startend(parts[0]), port_ranges_to_startend(parts[2]), parts[1]))
     return false
 
-proc parse_args(commandline: string): tuple[generators: seq[RefNetworkGenerator], workers: uint64, error: bool] =
+proc parse_args(commandline: string): tuple[generators: RefGlobalScanGenerator, workers: uint64, error: bool] =
     var
         error = false
         workers: uint64 = 0
         local_timeout: uint64 = 0 
-        scan_range = newSeq[RefNetworkGenerator]()
+        scan_range: RefGlobalScanGenerator = RefGlobalScanGenerator()
 
     var parser = initOptParser(commandline)
     for kind, key, value in parser.getopt():
@@ -564,6 +880,10 @@ proc parse_args(commandline: string): tuple[generators: seq[RefNetworkGenerator]
                         print_all = true
                     of "c", "close", "print-close":
                         print_close = true
+                    of "r", "no-random":
+                        random = false
+                    of "o", "no-optimization":
+                        optimized = false
                     of "t", "timeout":
                         (local_timeout, error) = argument_to_int("[-t/--timeout]", value, 0, 0)
                         timeout = int(local_timeout) * 1000
@@ -578,9 +898,9 @@ proc parse_args(commandline: string): tuple[generators: seq[RefNetworkGenerator]
     return (scan_range, workers, error)
 
 proc usages(): uint64 =
-    stderr.writeLine("Usages: scan [-t/--timeout] [-w/--workers=integer] [-f/--filtered/--print-filtered] [-c/--close/--print-close] [-a/--all/--print-all] scan-range1 scan-range2 ... scan-rangeN")
+    stderr.writeLine("Usages: scan [-o/--optimization] [-r/--no-random] [-t/--timeout] [-w/--workers=integer] [-f/--filtered/--print-filtered] [-c/--close/--print-close] [-a/--all/--print-all] scan-range1 scan-range2 ... scan-rangeN")
     stderr.writeLine("\tscan 127.0.0.1:tcp:20-445")
-    stderr.writeLine("\tscan -t=3 -w=3000 -a 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/8:icmp 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/255.0.0.0:tcp:20-445 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/8:udp:53,68,5353,5355")
+    stderr.writeLine("\tscan -o -r -t=3 -w=3000 -a 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/8:icmp 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/255.0.0.0:tcp:20-445 192.168.0.1-254,172.16.0.0-172.16.255.254,10.0.0.0/8:udp:53,68,5353,5355")
     return 1
 
 proc main(): uint64 =
@@ -598,16 +918,31 @@ proc main(): uint64 =
     when defined(linux):
         commandline = getIPv4Addresses(workers)
 
-    if generators.len == 0:
+    if generators.size == 0:
         (generators, workers, error) = parse_args(commandline)
 
-    if error or generators.len == 0:
+    if error or generators.size == 0:
         return usages()
 
     if workers == 0:
-        waitFor scan(generators)
+        if random:
+            if optimized:
+                waitFor optimized_random_scan(generators)
+            else:
+                waitFor random_scan(generators)
+        else:
+            waitFor scan(generators)
     else:
-        waitFor workers_scan(generators, workers)
+        if random:
+            if optimized:
+                waitFor optimized_workers_random_scan(generators, workers)
+            else:
+                waitFor workers_random_scan(generators, workers)
+        else:
+            waitFor workers_scan(generators, workers)
+
+    if errors != 0:
+        stderr.writeLine("Report:\n\t" & $tests  & " tests,\n\t" & $opens & " opens,\n\t" & $cancels & " cancels,\n\t" & $errors & " errors. Consider reducing the number of workers.")
     return 0
 
 system.quit(int(main()))
