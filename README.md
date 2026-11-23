@@ -18,6 +18,10 @@ Cross-platform asynchronous port scanner written in Nim.
 
 ### Windows
 
+Windows need an internal structure to stop an asynchronous call using IOCP, the name is `OVERLAPPED`. It's a structure defined at the `ConnectEx` call time, you can't access it through the Nim API, so i patch `asyncdispatch.nim` and `asyncnet.nim` to access the structure and call `CancelIoEx` with it. It's required because without this call there is an error on the `close` call (OSError on the `setSockOptInt` call because the socket was not in the good state).
+
+You should use an equivalent patch to compile it, see modifications on [asyncdispatch.nim here](https://github.com/mauricelambert/AsyncPortScanner/commit/cd60da16a0f9440c60d3431b6eb025164b4d8cef#diff-b08d10c4a03a9de74ea2de73c0beb74f3d7e9ee0ec77ebb3654abca870296bd6) and on [asyncnet.nim here](https://github.com/mauricelambert/AsyncPortScanner/commit/cd60da16a0f9440c60d3431b6eb025164b4d8cef#diff-0f0eb4cdcd292535e59a629316753fe1fe251013f9f67817fb03365caabb3def).
+
 #### Non static
 
 ```bash
@@ -51,14 +55,27 @@ Without any arguments the scan will detect all of your network interfaces and sc
 By default the scan is a TCP scan on all of this ports range:
 
  - 21-25
- - 135-139
+ - 53
  - 80
- - 443-445
+ - 110-143
+ - 389
+ - 443-465
+ - 631-636
+ - 993-995
+ - 1433-1434
+ - 1521
  - 3000
+ - 3306
  - 3389
  - 5000-5357
+ - 5432
+ - 6001
+ - 6379
+ - 7474
+ - 7547
+ - 7687
  - 8000-8888
- - 30102
+ - 27017
 
 ### Custom scan policy
 
