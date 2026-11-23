@@ -1,5 +1,5 @@
 #    Cross-platform asynchronous port scanner written in Nim.
-#    Copyright (C) 2023, 2024, 2025  Maurice Lambert
+#    Copyright (C) 2023-2026  Maurice Lambert
 
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
@@ -254,7 +254,7 @@ when defined(windows):
                 let network_repr = $ipAddr & "/" & $ipMask
                 self_ips.add(ip_to_int($ipAddr))
                 networks.add(ip_ranges_to_network(network_repr)[0])
-                output = output & " " & network_repr & ":tcp:21-25,53,80,110-143,389,443-465,631-636,993-995,1433-1434,1521,3000,3306,3389,5000-5357,5432,6001,6379,7474,7547,7687,8000-8888,27017"
+                output = output & " " & network_repr & ":tcp:21-25,53,80,110-143,389,443-465,587,631-636,993-995,1433-1434,1521,3000,3306,3389,5000-5357,5432,6001,6379,7474,7547,7687,8000-8888,27017"
           adapter = adapter.Next
       return output
 
@@ -336,7 +336,7 @@ when defined(linux):
           if ipAddr.len > 0 and netmaskAddr.len > 0:
             let network_repr = $ipAddr & "/" & $netmaskAddr
             networks.add(ip_ranges_to_network(network_repr)[0])
-            output = output & " " & network_repr & ":tcp:21-25,135-139,80,443-445,3000,3389,5000-5357,8000-8888,9100,30102"
+            output = output & " " & network_repr & ":tcp:21-25,53,80,110-143,389,443-465,587,631-636,993-995,1433-1434,1521,3000,3306,3389,5000-5357,5432,6001,6379,7474,7547,7687,8000-8888,27017"
 
         current = current.ifa_next
 
