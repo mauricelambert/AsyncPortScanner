@@ -363,24 +363,32 @@ when defined(linux):
 proc constructUniqueRandom(minimum: uint64, maximum: uint64, key: uint64 = 123456789): RefUniqueRandom =
     let n = maximum - minimum
     var a = key or 1'u64
+    if n == 0:
+        return RefUniqueRandom()
     while gcd(a, n) != 1:
         a += 2
     return RefUniqueRandom(minimum: minimum, n: n, a: a, b: (key * 6364136223846793005'u64) mod n)
 
 proc get(self: RefUniqueRandom, index: uint64): uint64 =
+    if self.n == 0 and index == 0: return self.minimum
     if index >= self.n:
         raise newException(StopIteration, "All values returned")
     self.minimum + (self.a * index + self.b) mod self.n
 
 proc infinite_get(self: RefUniqueRandom, index: uint64): uint64 =
+    if self.n == 0: return self.minimum
     self.minimum + (self.a * index + self.b) mod self.n
 
 proc has_next(self: RefUniqueRandom): bool =
+    if self.n == 0 and self.index == 0: return true
     if self.index >= self.n:
         return false
     return true
 
 proc next(self: RefUniqueRandom): uint64 =
+    if self.n == 0 and self.index == 0:
+        self.index += 1
+        return self.minimum
     if self.index >= self.n:
         raise newException(StopIteration, "All values returned")
     result = self.minimum + (self.a * self.index + self.b) mod self.n
@@ -607,7 +615,10 @@ proc test_udp(ip: string, port: uint16): Future[string] {.async.} =
 
     let socket = newAsyncSocket(Domain.AF_INET, SockType.SOCK_DGRAM, Protocol.IPPROTO_UDP)
 
-    await socket.connect(ip, Port(port))
+    try:
+        await socket.connect(ip, Port(port))
+    except OSError:
+        return ""
     await socket.send("\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01")
 
     let fd = socket.getFd()
