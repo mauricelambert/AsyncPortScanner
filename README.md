@@ -212,6 +212,8 @@ Print close:
 ./scan -w=100 -c 192.168.0.1/24,192.168.56.1/255.255.255.240:tcp:1-1024
 ```
 
+**To see closed UDP ports make sure your firewall doesn't block ICMP packets**, if you see an `ICMP Port Unreachable` in a packet sniffer such as *Wireshark* but you get an `open/filtered` result in the output, it's probably due to a firewall rule. 
+
 ## Licence
 
 Licensed under the [GPL, version 3](https://www.gnu.org/licenses/).
