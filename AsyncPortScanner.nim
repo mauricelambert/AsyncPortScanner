@@ -1,5 +1,5 @@
 #    Cross-platform asynchronous port scanner written in Nim.
-#    Copyright (C) 2023-2026  Maurice Lambert
+#    Copyright (C) 2023, 2024, 2025  Maurice Lambert
 
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
@@ -254,7 +254,7 @@ when defined(windows):
                 let network_repr = $ipAddr & "/" & $ipMask
                 self_ips.add(ip_to_int($ipAddr))
                 networks.add(ip_ranges_to_network(network_repr)[0])
-                output = output & " " & network_repr & ":tcp:21-25,53,80,110-143,389,443-465,587,631-636,993-995,1433-1434,1521,3000,3306,3389,5000-5357,5432,6001,6379,7474,7547,7687,8000-8888,27017"
+                output = output & " " & network_repr & ":tcp:21-25,53,80,110-143,389,443-465,631-636,993-995,1433-1434,1521,3000,3306,3389,5000-5357,5432,6001,6379,7474,7547,7687,8000-8888,27017"
           adapter = adapter.Next
       return output
 
@@ -336,7 +336,7 @@ when defined(linux):
           if ipAddr.len > 0 and netmaskAddr.len > 0:
             let network_repr = $ipAddr & "/" & $netmaskAddr
             networks.add(ip_ranges_to_network(network_repr)[0])
-            output = output & " " & network_repr & ":tcp:21-25,53,80,110-143,389,443-465,587,631-636,993-995,1433-1434,1521,3000,3306,3389,5000-5357,5432,6001,6379,7474,7547,7687,8000-8888,27017"
+            output = output & " " & network_repr & ":tcp:21-25,135-139,80,443-445,3000,3389,5000-5357,8000-8888,9100,30102"
 
         current = current.ifa_next
 
@@ -546,7 +546,7 @@ proc constructScanGenerator(ip_generator: RefIpGenerator, port_generator: RefPor
     scan_generator.protocol = protocol_int
     return scan_generator
 
-proc test_tcp(ip: string, port: uint16, error: bool = false): Future[void] {.async.} =
+proc test_tcp(ip: string, port: uint16, error: bool = false): Future[string] {.async.} =
     tests += 1
     var
         state = "filtered"
@@ -567,7 +567,7 @@ proc test_tcp(ip: string, port: uint16, error: bool = false): Future[void] {.asy
                         if error:
                             stderr.writeLine("Warning: Too many errors detected. Consider reducing the number of workers.")
                         socket.closed = true
-                        await test_tcp(ip, port, true)
+                        return await test_tcp(ip, port, true)
     except OSError:
         state = "close"
     finally:
@@ -578,28 +578,34 @@ proc test_tcp(ip: string, port: uint16, error: bool = false): Future[void] {.asy
             state = "close"
 
     if print_all or state == "open" or (print_filtered and state == "filtered") or (print_close and state == "close"):
-        echo "IP: " & ip & ", port: " & $port & "/tcp, state: " & state
+        return "IP: " & ip & ", port: " & $port & "/tcp, state: " & state
+    return ""
 
-proc test_udp(ip: string, port: uint16): Future[void] {.async.} =
+proc test_udp(ip: string, port: uint16): Future[string] {.async.} =
     var
         state = "open/filtered"
         no_timeout: bool
+
     let socket = newAsyncSocket(Domain.AF_INET, SockType.SOCK_DGRAM, Protocol.IPPROTO_UDP)
-    try:
+    # await socket.connect(ip, Port(port))
+
+    when defined(windows):
         await socket.sendTo(ip, Port(port), "")
-        no_timeout = await withTimeout(socket.recvFrom(1024), timeout)
-        if no_timeout:
-            state = "open"
-    except OSError:
-        state = "close"
-    finally:
-        if not socket.isClosed:
-          socket.close()
+        try:
+            no_timeout = await withTimeout(socket.recvFrom(1024), timeout)
+            if no_timeout:
+                state = "open"
+        except OSError:
+            state = "close"
+        finally:
+            if not socket.isClosed:
+              socket.close()
 
     if print_all or state == "open" or state == "open/filtered" or (print_close and state == "close"):
-        echo "IP: " & ip & ", port: " & $port & "/udp, state: " & state
+        return "IP: " & ip & ", port: " & $port & "/udp, state: " & state
+    return ""
 
-proc test_icmp(ip: string): Future[void] {.async.} =
+proc test_icmp(ip: string): Future[string] {.async.} =
     var
         state = "down"
         no_timeout: bool
@@ -616,7 +622,8 @@ proc test_icmp(ip: string): Future[void] {.async.} =
           socket.close()
 
     if state == "up" or print_all  or (print_close and state == "down"):
-        echo "IP: " & ip & "/icmp, state: " & state
+        return "IP: " & ip & "/icmp, state: " & state
+    return ""
 
 proc test_connection(next: uint64): Future[void] {.async.} =
     let
@@ -624,6 +631,8 @@ proc test_connection(next: uint64): Future[void] {.async.} =
         port: uint16 = uint16(next shr 8 and 0xffff)
         ip_int: uint32 = uint32(next shr 24 and uint64(0xffffffff))
         ip: string = int_to_ip(ip_int)
+
+    var message: string
 
     if not ip_used.hasKey(ip_int):
         ip_used[ip_int] = IpState.not_local_ip
@@ -639,17 +648,21 @@ proc test_connection(next: uint64): Future[void] {.async.} =
         return
 
     if protocol == 6:
-        await test_tcp(ip, port)
+        message = await test_tcp(ip, port)
     elif protocol == 17:
-        await test_udp(ip, port)
+        message = await test_udp(ip, port)
     elif protocol == 1:
-        await test_icmp(ip)
+        message = await test_icmp(ip)
 
     if ip_used[ip_int] == IpState.not_checked:
         if check_ip_in_arp_cache(ip_int):
             ip_used[ip_int] = IpState.in_arptable
         else:
             ip_used[ip_int] = IpState.not_in_arptable
+            return
+
+    if ip_used[ip_int] != IpState.not_in_arptable and message != "":
+        echo message
 
 proc first_random_loop(generator: RefScanGenerator): Future[void] {.async.} =
     var futures = newSeq[Future[void]]()
