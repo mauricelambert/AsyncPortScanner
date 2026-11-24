@@ -22,7 +22,7 @@
 # To compile on windows with nim 1.6.14:
 # nim c --os:linux --cpu:amd64 --stackTrace:off  --lineTrace:off --checks:off --assertions:off -d:release -d:linux AsyncPortScanner.nim
 
-import std/[asyncnet, asyncdispatch, net, strutils, parseopt, sequtils, math, tables, times, nativesockets, os]
+import std/[asyncnet, asyncdispatch, net, strutils, parseopt, sequtils, math, tables, times, nativesockets]
 import system
 when defined(windows):
     import winim/lean
