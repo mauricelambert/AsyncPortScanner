@@ -383,12 +383,12 @@ proc add_ips(self: RefIpGenerator, start_ip: uint32, end_ip: uint32): uint64 =
         self.size += 1
         return 1
     self.ips.add(IpEntry(kind: IpRange, start_ip: start_ip, end_ip: end_ip))
-    let count = end_ip - start_ip + 1
+    let count = uint64(end_ip - start_ip) + 1
     self.size += count
     return count
 
 proc find_ip(self: RefIpGenerator, index: uint32): uint32 =
-    var remaining = index
+    var remaining = uint64(index)
 
     for entry in self.ips:
         case entry.kind:
@@ -397,9 +397,9 @@ proc find_ip(self: RefIpGenerator, index: uint32): uint32 =
                 return entry.ip
             remaining -= 1
         of IpRange:
-            let count = entry.end_ip - entry.start_ip + 1
+            let count = uint64(entry.end_ip - entry.start_ip) + 1
             if remaining < count:
-                return entry.start_ip + remaining
+                return entry.start_ip + uint32(remaining)
             remaining -= count
 
     raise newException(IndexDefect, "IP index out of bounds (" & $index & "/" & $self.size & ")")
@@ -434,12 +434,12 @@ proc add_ports(self: RefPortGenerator, start_port: uint16, end_port: uint16): ui
         self.size += 1
         return 1
     self.ports.add(PortEntry(kind: PortRange, start_port: start_port, end_port: end_port))
-    let count = end_port - start_port + 1
+    let count = uint64(end_port - start_port) + 1
     self.size += count
     return count
 
 proc find_port(self: RefPortGenerator, index: uint32): uint16 =
-    var remaining = index
+    var remaining = uint64(index)
 
     for entry in self.ports:
         case entry.kind:
@@ -448,7 +448,7 @@ proc find_port(self: RefPortGenerator, index: uint32): uint16 =
                 return entry.port
             remaining -= 1
         of PortRange:
-            let count = entry.end_port - entry.start_port + 1
+            let count = uint64(entry.end_port - entry.start_port) + 1
             if remaining < count:
                 return entry.start_port + uint16(remaining)
             remaining -= count
@@ -517,7 +517,7 @@ proc find_scan(self: RefGlobalScanGenerator, index: uint64): uint64 =
     if index >= self.size:
         raise newException(IndexDefect, "Scan index out of bounds (" & $index & "/" & $self.size & ")")
 
-    var remaining = index
+    var remaining = uint64(index)
     for scan in self.scans:
         if remaining < scan.size:
             return scan.find_connection(remaining)
