@@ -346,24 +346,32 @@ when defined(linux):
 proc constructUniqueRandom(minimum: uint64, maximum: uint64, key: uint64 = 123456789): RefUniqueRandom =
     let n = maximum - minimum
     var a = key or 1'u64
+    if n == 0:
+        return RefUniqueRandom()
     while gcd(a, n) != 1:
         a += 2
     return RefUniqueRandom(minimum: minimum, n: n, a: a, b: (key * 6364136223846793005'u64) mod n)
 
 proc get(self: RefUniqueRandom, index: uint64): uint64 =
+    if self.n == 0 and index == 0: return self.minimum
     if index >= self.n:
         raise newException(StopIteration, "All values returned")
     self.minimum + (self.a * index + self.b) mod self.n
 
 proc infinite_get(self: RefUniqueRandom, index: uint64): uint64 =
+    if self.n == 0: return self.minimum
     self.minimum + (self.a * index + self.b) mod self.n
 
 proc has_next(self: RefUniqueRandom): bool =
+    if self.n == 0 and self.index == 0: return true
     if self.index >= self.n:
         return false
     return true
 
 proc next(self: RefUniqueRandom): uint64 =
+    if self.n == 0 and self.index == 0:
+        self.index += 1
+        return self.minimum
     if self.index >= self.n:
         raise newException(StopIteration, "All values returned")
     result = self.minimum + (self.a * self.index + self.b) mod self.n
@@ -539,6 +547,9 @@ proc constructScanGenerator(ip_generator: RefIpGenerator, port_generator: RefPor
         protocol_int = 17
     elif protocol == "icmp":
         protocol_int = 1
+        port_generator.ports.setLen(0)
+        port_generator.size = 0
+        discard port_generator.add_ports(0, 0)
     else:
         raise newException(ValueError, "Protocol may be 'icmp', 'tcp' or 'udp', not: " & protocol)
 
@@ -678,7 +689,8 @@ proc optimized_random_scan(generators: RefGlobalScanGenerator): Future[void] {.a
     var futures = newSeq[Future[void]]()
     for i in 0 ..< generators.scans.len:
         let generator: RefScanGenerator = generators.scans[i]
-        await first_random_loop(generator)
+        if generator.size != generator.ip_generator.size:
+            await first_random_loop(generator)
         let random_index = constructUniqueRandom(0, generator.size, uint64(epochTime()))
         for i in 0 ..< generator.size:
             futures.add(test_connection(generator.find_connection(random_index.get(uint64(i)))))
